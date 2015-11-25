@@ -116,7 +116,7 @@ class VMUtilsTestCase(test.NoDBTestCase):
     def test_lookup_vm_ok(self):
         mock_vm = mock.MagicMock()
         self._vmutils._conn.Msvm_ComputerSystem.return_value = [mock_vm]
-        vm = self._vmutils._lookup_vm_check(self._FAKE_VM_NAME)
+        vm = self._vmutils._lookup_vm_check(self._FAKE_VM_NAME, as_vssd=False)
         self.assertEqual(mock_vm, vm)
 
     def test_lookup_vm_multiple(self):
@@ -124,13 +124,22 @@ class VMUtilsTestCase(test.NoDBTestCase):
         self._vmutils._conn.Msvm_ComputerSystem.return_value = [mockvm, mockvm]
         self.assertRaises(vmutils.HyperVException,
                           self._vmutils._lookup_vm_check,
-                          self._FAKE_VM_NAME)
+                          self._FAKE_VM_NAME,
+                          as_vssd=False)
 
     def test_lookup_vm_none(self):
         self._vmutils._conn.Msvm_ComputerSystem.return_value = []
         self.assertRaises(exception.InstanceNotFound,
                           self._vmutils._lookup_vm_check,
-                          self._FAKE_VM_NAME)
+                          self._FAKE_VM_NAME,
+                          as_vssd=False)
+
+    def test_lookup_vm_as_vssd(self):
+        self._vmutils._conn.Msvm_VirtualSystemSettingData.return_value = [
+            mock.sentinel.fake_vssd]
+
+        vssd = self._vmutils._lookup_vm_check(self._FAKE_VM_NAME)
+        self.assertEqual(mock.sentinel.fake_vssd, vssd)
 
     def test_set_vm_memory_static(self):
         self._test_set_vm_memory_dynamic(1.0)
@@ -140,23 +149,26 @@ class VMUtilsTestCase(test.NoDBTestCase):
 
     def _test_set_vm_memory_dynamic(self, dynamic_memory_ratio,
                                     mem_per_numa_node=None):
-        mock_vm = self._lookup_vm()
-
         mock_s = self._vmutils._conn.Msvm_VirtualSystemSettingData()[0]
         mock_s.SystemType = 3
 
-        mock_vmsetting = mock.MagicMock()
-        mock_vmsetting.associators.return_value = [mock_s]
+        self._vmutils._conn.query.return_value = [mock_s]
 
         self._vmutils._modify_virt_resource = mock.MagicMock()
 
-        self._vmutils._set_vm_memory(mock_vm, mock_vmsetting,
+        self._vmutils._set_vm_memory(mock_s,
                                      self._FAKE_MEMORY_MB,
                                      mem_per_numa_node,
                                      dynamic_memory_ratio)
 
+        expected_query = (
+            "SELECT * FROM %(class_name)s WHERE InstanceID "
+            "LIKE 'Microsoft:%(instance_id)s%%'" % {
+                'class_name': self._vmutils._MEMORY_SETTING_DATA_CLASS,
+                'instance_id': mock_s.ConfigurationID})
+        self._vmutils._conn.query.assert_called_once_with(expected_query)
         self._vmutils._modify_virt_resource.assert_called_with(
-            mock_s, self._FAKE_VM_PATH)
+            mock_s, mock_s.path_.return_value)
 
         if mem_per_numa_node:
             self.assertEqual(mem_per_numa_node,
@@ -173,21 +185,25 @@ class VMUtilsTestCase(test.NoDBTestCase):
         self._check_set_vm_vcpus(vcpus_per_numa_node=1)
 
     def _check_set_vm_vcpus(self, vcpus_per_numa_node=None):
-        mock_vm = self._lookup_vm()
-
         procsetting = mock.MagicMock()
         mock_vmsetting = mock.MagicMock()
-        mock_vmsetting.associators.return_value = [procsetting]
+        self._vmutils._conn.query.return_value = [procsetting]
 
         self._vmutils._modify_virt_resource = mock.MagicMock()
 
-        self._vmutils._set_vm_vcpus(mock_vm, mock_vmsetting,
+        self._vmutils._set_vm_vcpus(mock_vmsetting,
                                     self._FAKE_VCPUS_NUM,
                                     vcpus_per_numa_node,
                                     limit_cpu_features=False)
 
+        expected_query = (
+            "SELECT * FROM %(class_name)s WHERE InstanceID "
+            "LIKE 'Microsoft:%(instance_id)s%%'" % {
+                'class_name': self._vmutils._PROCESSOR_SETTING_DATA_CLASS,
+                'instance_id': mock_vmsetting.ConfigurationID})
+        self._vmutils._conn.query.assert_called_once_with(expected_query)
         self._vmutils._modify_virt_resource.assert_called_once_with(
-            procsetting, self._FAKE_VM_PATH)
+            procsetting, mock_vmsetting.path_.return_value)
         if vcpus_per_numa_node:
             self.assertEqual(vcpus_per_numa_node,
                              procsetting.MaxProcessorsPerNumaNode)
@@ -196,21 +212,33 @@ class VMUtilsTestCase(test.NoDBTestCase):
         mock_vm = self._lookup_vm()
         mock_shutdown = mock.MagicMock()
         mock_shutdown.InitiateShutdown.return_value = (self._FAKE_RET_VAL, )
-        mock_vm.associators.return_value = [mock_shutdown]
+        self._vmutils._conn.query.return_value = [mock_shutdown]
 
         with mock.patch.object(self._vmutils, 'check_ret_val') as mock_check:
             self._vmutils.soft_shutdown_vm(self._FAKE_VM_NAME)
 
+            expected_query = (
+                "SELECT * FROM %(class_name)s "
+                "WHERE SystemName='%(instance_id)s'" % {
+                    'class_name': self._vmutils._SHUTDOWN_COMPONENT,
+                    'instance_id': mock_vm.Name})
+            self._vmutils._conn.query.assert_called_once_with(expected_query)
             mock_shutdown.InitiateShutdown.assert_called_once_with(
                 Force=False, Reason=mock.ANY)
             mock_check.assert_called_once_with(self._FAKE_RET_VAL, None)
 
     def test_soft_shutdown_vm_no_component(self):
         mock_vm = self._lookup_vm()
-        mock_vm.associators.return_value = []
+        self._vmutils._conn.query.return_value = []
 
         with mock.patch.object(self._vmutils, 'check_ret_val') as mock_check:
             self._vmutils.soft_shutdown_vm(self._FAKE_VM_NAME)
+            expected_query = (
+                "SELECT * FROM %(class_name)s "
+                "WHERE SystemName='%(instance_id)s'" % {
+                    'class_name': self._vmutils._SHUTDOWN_COMPONENT,
+                    'instance_id': mock_vm.Name})
+            self._vmutils._conn.query.assert_called_once_with(expected_query)
             self.assertFalse(mock_check.called)
 
     @mock.patch('hyperv.nova.vmutils.VMUtils._get_vm_disks')
@@ -226,19 +254,28 @@ class VMUtilsTestCase(test.NoDBTestCase):
         self.assertEqual([self._FAKE_VOLUME_DRIVE_PATH], volume_drives)
 
     def test_get_vm_disks(self):
-        mock_vm = self._lookup_vm()
-        mock_vmsettings = [mock.MagicMock()]
-        mock_vm.associators.return_value = mock_vmsettings
+        mock_vmsettings = self._lookup_vm()
 
         mock_rasds = self._create_mock_disks()
-        mock_vmsettings[0].associators.return_value = mock_rasds
+        self._vmutils._conn.query.return_value = mock_rasds
 
-        (disks, volumes) = self._vmutils._get_vm_disks(mock_vm)
+        (disks, volumes) = self._vmutils._get_vm_disks(mock_vmsettings)
 
-        mock_vm.associators.assert_called_with(
-            wmi_result_class=self._vmutils._VIRTUAL_SYSTEM_SETTING_DATA_CLASS)
-        mock_vmsettings[0].associators.assert_called_with(
-            wmi_result_class=self._vmutils._RESOURCE_ALLOC_SETTING_DATA_CLASS)
+        query = ("SELECT * FROM %(class_name)s WHERE InstanceID "
+                 "LIKE 'Microsoft:%(instance_id)s%%'")
+        expected_query = query % {
+                'class_name': self._vmutils._STORAGE_ALLOC_SETTING_DATA_CLASS,
+                'instance_id': mock_vmsettings.ConfigurationID}
+        if (self._vmutils._RESOURCE_ALLOC_SETTING_DATA_CLASS ==
+                self._vmutils._STORAGE_ALLOC_SETTING_DATA_CLASS):
+            self._vmutils._conn.query.assert_called_once_with(expected_query)
+        else:
+            second_expected_query = query % {
+                'class_name': self._vmutils._RESOURCE_ALLOC_SETTING_DATA_CLASS,
+                'instance_id': mock_vmsettings.ConfigurationID}
+            expected_calls = [mock.call(expected_query),
+                              mock.call(second_expected_query)]
+            self._vmutils._conn.query.assert_has_calls(expected_calls)
         self.assertEqual([mock_rasds[0]], disks)
         self.assertEqual([mock_rasds[1]], volumes)
 
@@ -262,22 +299,18 @@ class VMUtilsTestCase(test.NoDBTestCase):
     def test_update_vm(self, mock_set_mem, mock_set_vcpus):
         mock_vm = self._lookup_vm()
 
-        with mock.patch.object(self._vmutils,
-                               '_get_vm_setting_data') as mock_get_vmsd:
-            vmsettings = mock_get_vmsd.return_value
+        self._vmutils.update_vm(
+            mock.sentinel.vm_name, mock.sentinel.memory_mb,
+            mock.sentinel.memory_per_numa, mock.sentinel.vcpus_num,
+            mock.sentinel.vcpus_per_numa, mock.sentinel.limit_cpu_features,
+            mock.sentinel.dynamic_mem_ratio)
 
-            self._vmutils.update_vm(
-                mock.sentinel.vm_name, mock.sentinel.memory_mb,
-                mock.sentinel.memory_per_numa, mock.sentinel.vcpus_num,
-                mock.sentinel.vcpus_per_numa, mock.sentinel.limit_cpu_features,
-                mock.sentinel.dynamic_mem_ratio)
-
-            mock_set_mem.assert_called_once_with(
-                mock_vm, vmsettings, mock.sentinel.memory_mb,
-                mock.sentinel.memory_per_numa, mock.sentinel.dynamic_mem_ratio)
-            mock_set_vcpus.assert_called_once_with(
-                mock_vm, vmsettings, mock.sentinel.vcpus_num,
-                mock.sentinel.vcpus_per_numa, mock.sentinel.limit_cpu_features)
+        mock_set_mem.assert_called_once_with(
+            mock_vm, mock.sentinel.memory_mb,
+            mock.sentinel.memory_per_numa, mock.sentinel.dynamic_mem_ratio)
+        mock_set_vcpus.assert_called_once_with(
+            mock_vm, mock.sentinel.vcpus_num,
+            mock.sentinel.vcpus_per_numa, mock.sentinel.limit_cpu_features)
 
     def test_create_vm(self):
         with mock.patch.object(self._vmutils,
@@ -328,26 +361,36 @@ class VMUtilsTestCase(test.NoDBTestCase):
                               mock.sentinel.scsi_controller_path)
 
     def test_get_vm_ide_controller(self):
-        self._prepare_get_vm_controller(self._vmutils._IDE_CTRL_RES_SUB_TYPE)
-        path = self._vmutils.get_vm_ide_controller(self._FAKE_VM_NAME,
-                                                   self._FAKE_ADDRESS)
+        expected_query = self._prepare_get_vm_controller(
+            self._vmutils._IDE_CTRL_RES_SUB_TYPE)
+        path = self._vmutils.get_vm_ide_controller(
+            mock.sentinel.FAKE_VM_SETTINGS, self._FAKE_ADDRESS)
+        self._vmutils._conn.query.assert_called_once_with(
+            expected_query)
         self.assertEqual(self._FAKE_RES_PATH, path)
 
     def test_get_vm_ide_controller_none(self):
-        self._prepare_get_vm_controller(self._vmutils._IDE_CTRL_RES_SUB_TYPE)
+        expected_query = self._prepare_get_vm_controller(
+            self._vmutils._IDE_CTRL_RES_SUB_TYPE)
         path = self._vmutils.get_vm_ide_controller(
-            mock.sentinel.FAKE_VM_NAME, mock.sentinel.FAKE_NOT_FOUND_ADDR)
+            mock.sentinel.FAKE_VM_SETTINGS, mock.sentinel.FAKE_NOT_FOUND_ADDR)
+        self._vmutils._conn.query.assert_called_once_with(
+            expected_query)
         self.assertNotEqual(self._FAKE_RES_PATH, path)
 
     def _prepare_get_vm_controller(self, resource_sub_type):
-        mock_vm = self._lookup_vm()
-        mock_vm_settings = mock.MagicMock()
+        mock_vmsettings = self._lookup_vm()
         mock_rasds = mock.MagicMock()
         mock_rasds.path_.return_value = self._FAKE_RES_PATH
         mock_rasds.ResourceSubType = resource_sub_type
         mock_rasds.Address = self._FAKE_ADDRESS
-        mock_vm_settings.associators.return_value = [mock_rasds]
-        mock_vm.associators.return_value = [mock_vm_settings]
+        self._vmutils._conn.query.return_value = [mock_rasds]
+        expected_query = (
+            "SELECT * FROM %(class_name)s WHERE InstanceID "
+            "LIKE 'Microsoft:%(instance_id)s%%'" % {
+                'class_name': self._vmutils._RESOURCE_ALLOC_SETTING_DATA_CLASS,
+                'instance_id': mock_vmsettings.ConfigurationID})
+        return expected_query
 
     def _prepare_resources(self, mock_path, mock_subtype, mock_vm_settings):
         mock_rasds = mock_vm_settings.associators.return_value[0]
@@ -607,19 +650,28 @@ class VMUtilsTestCase(test.NoDBTestCase):
     @mock.patch.object(vmutils, 'wmi', create=True)
     @mock.patch.object(vmutils.VMUtils, 'check_ret_val')
     def test_take_vm_snapshot(self, mock_check_ret_val, mock_wmi):
-        self._lookup_vm()
+        mock_vm = self._lookup_vm()
+        fake_snp_setting_data_path = 'fake_snp_setting_data_path'
 
         mock_svc = self._get_snapshot_service()
         mock_svc.CreateVirtualSystemSnapshot.return_value = (
             self._FAKE_JOB_PATH, self._FAKE_RET_VAL, mock.MagicMock())
+        self._vmutils._conn.query.return_value = [
+            mock.MagicMock(Dependent=fake_snp_setting_data_path)]
 
-        self._vmutils.take_vm_snapshot(self._FAKE_VM_NAME)
+        resulted_snp_setting_data_path = (
+            self._vmutils.take_vm_snapshot(self._FAKE_VM_NAME))
 
         mock_svc.CreateVirtualSystemSnapshot.assert_called_with(
             self._FAKE_VM_PATH)
 
         mock_check_ret_val.assert_called_once_with(self._FAKE_RET_VAL,
                                                    self._FAKE_JOB_PATH)
+        expected_query = ("SELECT * FROM Msvm_MostCurrentSnapshotInBranch "
+                          "WHERE Antecedent='%s'" % mock_vm.path_())
+        self._vmutils._conn.query.assert_called_once_with(expected_query)
+        self.assertEqual(fake_snp_setting_data_path,
+                         resulted_snp_setting_data_path)
 
     def test_remove_vm_snapshot(self):
         mock_svc = self._get_snapshot_service()
@@ -715,21 +767,23 @@ class VMUtilsTestCase(test.NoDBTestCase):
         self.assertEqual(['active_vm'], active_instances)
 
     def test_get_vm_serial_ports(self):
-        mock_vm = self._lookup_vm()
-        mock_vmsettings = [mock.MagicMock()]
-        mock_vm.associators.return_value = mock_vmsettings
+        mock_vmsettings = self._lookup_vm()
 
         fake_serial_port = mock.MagicMock()
         fake_serial_port.ResourceSubType = (
             self._vmutils._SERIAL_PORT_RES_SUB_TYPE)
 
         mock_rasds = [fake_serial_port]
-        mock_vmsettings[0].associators.return_value = mock_rasds
+        self._vmutils._conn.query.return_value = mock_rasds
 
-        ret_val = self._vmutils._get_vm_serial_ports(mock_vm)
+        ret_val = self._vmutils._get_vm_serial_ports(mock_vmsettings)
 
-        mock_vmsettings[0].associators.assert_called_once_with(
-            wmi_result_class=self._vmutils._SERIAL_PORT_SETTING_DATA_CLASS)
+        expected_query = (
+            "SELECT * FROM %(class_name)s WHERE InstanceID "
+            "LIKE 'Microsoft:%(instance_id)s%%'" % {
+                'class_name': self._vmutils._SERIAL_PORT_SETTING_DATA_CLASS,
+                'instance_id': mock_vmsettings.ConfigurationID})
+        self._vmutils._conn.query.assert_called_once_with(expected_query)
         self.assertEqual(mock_rasds, ret_val)
 
     def test_set_vm_serial_port_conn(self):
@@ -805,9 +859,7 @@ class VMUtilsTestCase(test.NoDBTestCase):
     @mock.patch('hyperv.nova.vmutils.VMUtils.check_ret_val')
     @mock.patch('hyperv.nova.vmutils.VMUtils._get_wmi_obj')
     @mock.patch('hyperv.nova.vmutils.VMUtils._modify_virtual_system')
-    @mock.patch('hyperv.nova.vmutils.VMUtils._get_vm_setting_data')
-    def test_create_vm_obj(self, mock_get_vm_setting_data,
-                           mock_modify_virtual_system,
+    def test_create_vm_obj(self, mock_modify_virtual_system,
                            mock_get_wmi_obj, mock_check_ret_val):
         mock_vs_gs_data = mock.MagicMock()
         fake_vm_path = 'fake vm path'
@@ -820,6 +872,10 @@ class VMUtilsTestCase(test.NoDBTestCase):
         mock_vs_man_svc.DefineVirtualSystem.return_value = (fake_vm_path,
                                                             fake_job_path,
                                                             fake_ret_val)
+
+        _conn_vssd = self._vmutils._conn.Msvm_VirtualSystemSettingData
+        fake_vmsettings = mock.MagicMock()
+        _conn_vssd.return_value = [fake_vmsettings]
 
         response = self._vmutils._create_vm_obj(
             vm_name='fake vm', vm_gen='fake vm gen',
@@ -836,14 +892,16 @@ class VMUtilsTestCase(test.NoDBTestCase):
         self.assertEqual(mock.sentinel.instance_path,
                          mock_vs_gs_data.SnapshotDataRoot)
 
+        _conn_vssd.assert_called_once_with(
+            ElementName=mock_get_wmi_obj.return_value,
+            VirtualSystemType='Microsoft:Hyper-V:System:Realized')
         mock_get_wmi_obj.assert_called_with(fake_vm_path)
-        mock_get_vm_setting_data.assert_called_once_with(mock_get_wmi_obj())
         mock_modify_virtual_system.assert_called_once_with(
-            fake_vm_path, mock_get_vm_setting_data())
+            fake_vm_path, fake_vmsettings)
 
-        self.assertEqual(mock_get_vm_setting_data().Notes,
+        self.assertEqual(fake_vmsettings.Notes,
                          '\n'.join('fake notes'))
-        self.assertEqual(response, mock_get_wmi_obj())
+        self.assertEqual(response, mock_get_wmi_obj.return_value)
 
     def test_list_instances(self):
         vs = mock.MagicMock()
@@ -916,11 +974,8 @@ class VMUtilsTestCase(test.NoDBTestCase):
         return self._FAKE_VM_UUID
 
     def test_instance_notes(self):
-        self._lookup_vm()
-        mock_vm_settings = mock.Mock()
+        mock_vm_settings = self._lookup_vm()
         mock_vm_settings.Notes = self._get_fake_instance_notes()
-        self._vmutils._get_vm_setting_data = mock.Mock(
-            return_value=mock_vm_settings)
 
         notes = self._vmutils._get_instance_notes(mock.sentinel.vm_name)
 
@@ -975,21 +1030,34 @@ class VMUtilsTestCase(test.NoDBTestCase):
 
     def test_stop_vm_jobs(self):
         mock_vm = self._lookup_vm()
+        fake_vm_path = 'fake_vm_path'
+        mock_vm.path_.return_value = fake_vm_path
 
         mock_job1 = mock.MagicMock(Cancellable=True)
         mock_job2 = mock.MagicMock(Cancellable=True)
         mock_job3 = mock.MagicMock(Cancellable=True)
 
+        self._vmutils._get_wmi_obj = mock.MagicMock(
+            side_effect=[mock_job1, mock_job2, mock_job3])
+
         mock_job1.JobState = 2
         mock_job2.JobState = 3
         mock_job3.JobState = constants.JOB_STATE_KILLED
 
-        mock_vm_jobs = [mock_job1, mock_job2, mock_job3]
+        mock_owned_job1 = mock.MagicMock(OwningElement=fake_vm_path)
+        mock_owned_job2 = mock.MagicMock(OwningElement=fake_vm_path)
+        mock_owned_job3 = mock.MagicMock(OwningElement=fake_vm_path)
 
-        mock_vm.associators.return_value = mock_vm_jobs
+        mock_jobs_owned_by_vm = [mock_owned_job1,
+                                 mock_owned_job2,
+                                 mock_owned_job3]
+
+        self._vmutils._conn.query.return_value = mock_jobs_owned_by_vm
 
         self._vmutils.stop_vm_jobs(mock.sentinel.FAKE_VM_NAME)
 
+        expected_query = "SELECT * FROM Msvm_OwningJobElement"
+        self._vmutils._conn.query.assert_called_once_with(expected_query)
         mock_job1.RequestStateChange.assert_called_once_with(
             self._vmutils._KILL_JOB_STATE_CHANGE_REQUEST)
         mock_job2.RequestStateChange.assert_called_once_with(
@@ -1006,18 +1074,15 @@ class VMUtilsTestCase(test.NoDBTestCase):
 
         self.assertFalse(self._vmutils._is_job_completed(job))
 
-    @mock.patch.object(vmutils.VMUtils, '_get_vm_setting_data')
     @mock.patch.object(vmutils.VMUtils, '_modify_virtual_system')
-    def test_set_boot_order_gen1(self, mock_modify_virt_syst,
-                            mock_get_vm_setting_data):
-        mock_vm = self._lookup_vm()
+    def test_set_boot_order_gen1(self, mock_modify_virt_syst):
+        mock_vssd = self._lookup_vm()
 
-        mock_vssd = mock_get_vm_setting_data.return_value
         fake_dev_boot_order = [mock.sentinel.BOOT_DEV1,
                                mock.sentinel.BOOT_DEV2]
 
-        self._vmutils._set_boot_order(mock_vm.name, fake_dev_boot_order)
+        self._vmutils._set_boot_order(mock_vssd.name, fake_dev_boot_order)
 
         mock_modify_virt_syst.assert_called_once_with(
-            mock_vm.path_.return_value, mock_vssd)
+            mock_vssd.path_.return_value, mock_vssd)
         self.assertEqual(tuple(fake_dev_boot_order), mock_vssd.BootOrder)
