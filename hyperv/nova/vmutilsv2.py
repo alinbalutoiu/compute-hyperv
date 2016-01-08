@@ -151,15 +151,14 @@ class VMUtilsV2(vmutils.VMUtils):
             SystemSettings=vs_data.GetText_(1))
         job = self.check_ret_val(ret_val, job_path)
         if not vm_path and job:
-            vm_path = job.associators(self._AFFECTED_JOB_ELEMENT_CLASS)[0]
+            vm_path = getattr(job,
+                              self._AFFECTED_JOB_ELEMENT_CLASS)[0]
         return self._get_wmi_obj(vm_path)
 
     def _get_vm_setting_data(self, vm):
-        vmsettings = vm.associators(
-            wmi_result_class=self._VIRTUAL_SYSTEM_SETTING_DATA_CLASS)
-        # Avoid snapshots
-        return [s for s in vmsettings if
-                s.VirtualSystemType == self._VIRTUAL_SYSTEM_TYPE_REALIZED][0]
+        return getattr(self._conn, self._VIRTUAL_SYSTEM_SETTING_DATA_CLASS)(
+            InstanceID=u"Microsoft:%s" % vm.Name,
+            VirtualSystemType=self._VIRTUAL_SYSTEM_TYPE_REALIZED)[0]
 
     def _get_attached_disks_query_string(self, scsi_controller_path):
         # DVD Drives can be attached to SCSI as well, if the VM Generation is 2
@@ -289,8 +288,8 @@ class VMUtilsV2(vmutils.VMUtils):
 
         job_wmi_path = job_path.replace('\\', '/')
         job = wmi.WMI(moniker=job_wmi_path)
-        snp_setting_data = job.associators(
-            wmi_result_class=self._VIRTUAL_SYSTEM_SETTING_DATA_CLASS)[0]
+        snp_setting_data = getattr(job,
+                                   self._VIRTUAL_SYSTEM_SETTING_DATA_CLASS)[0]
 
         return snp_setting_data.path_()
 
@@ -342,10 +341,12 @@ class VMUtilsV2(vmutils.VMUtils):
     def get_vm_dvd_disk_paths(self, vm_name):
         vm = self._lookup_vm_check(vm_name)
 
-        settings = vm.associators(
-            wmi_result_class=self._VIRTUAL_SYSTEM_SETTING_DATA_CLASS)[0]
-        sasds = settings.associators(
-            wmi_result_class=self._STORAGE_ALLOC_SETTING_DATA_CLASS)
+        settings = getattr(
+            self._conn,
+            self._VIRTUAL_SYSTEM_SETTING_DATA_CLASS)(
+                InstanceID=u"Microsoft:%s" % vm.Name)[0]
+        sasds = getattr(settings,
+                        self._STORAGE_ALLOC_SETTING_DATA_CLASS)
 
         dvd_paths = [sasd.HostResource[0] for sasd in sasds
                      if sasd.ResourceSubType == self._DVD_DISK_RES_SUB_TYPE]
@@ -378,10 +379,12 @@ class VMUtilsV2(vmutils.VMUtils):
                                             "is required that the host CPUs "
                                             "support SLAT"))
 
-        vmsettings = vm.associators(
-            wmi_result_class=self._VIRTUAL_SYSTEM_SETTING_DATA_CLASS)
-        rasds = vmsettings[0].associators(
-            wmi_result_class=self._CIM_RES_ALLOC_SETTING_DATA_CLASS)
+        vmsettings = getattr(
+            self._conn,
+            self._VIRTUAL_SYSTEM_SETTING_DATA_CLASS)(
+                InstanceID=u"Microsoft:%s" % vm.Name)[0]
+        rasds = getattr(vmsettings,
+                        self._CIM_RES_ALLOC_SETTING_DATA_CLASS)
 
         if [r for r in rasds if r.ResourceSubType ==
                 self._SYNTH_3D_DISP_CTRL_RES_SUB_TYPE]:
@@ -459,12 +462,12 @@ class VMUtilsV2(vmutils.VMUtils):
             drive_path, is_physical=is_physical)
 
         if is_physical:
-            bssd = drive.associators(
-                wmi_association_class=self._LOGICAL_IDENTITY_CLASS)[0]
+            bssd = getattr(drive,
+                           self._LOGICAL_IDENTITY_CLASS)[0]
         else:
             rasd = wmi.WMI(moniker=drive.Parent)
-            bssd = rasd.associators(
-                wmi_association_class=self._LOGICAL_IDENTITY_CLASS)[0]
+            bssd = getattr(rasd,
+                           self._LOGICAL_IDENTITY_CLASS)[0]
         return bssd
 
     def set_boot_order(self, vm_name, device_boot_order):
