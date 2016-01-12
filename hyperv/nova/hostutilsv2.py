@@ -46,7 +46,14 @@ class HostUtilsV2(hostutils.HostUtils):
         numa_nodes = self._conn_virt.Msvm_NumaNode()
         nodes_info = []
         for node in numa_nodes:
-            memory_info = self._get_numa_memory_info(node)
+            numa_assoc_query = ("SELECT * FROM Msvm_HostedDependency "
+                                "WHERE Antecedent = '%s'" % node.path_())
+            numa_assoc = self._conn_virt.query(numa_assoc_query)
+            numa_node_paths = [item.Dependent for item in numa_assoc]
+
+            system_memories = self._conn_virt.Msvm_Memory()
+            memory_info = self._get_numa_memory_info(numa_node_paths,
+                                                     system_memories)
             if not memory_info:
                 LOG.warning(_LW("Could not find memory information for NUMA "
                                 "node. Skipping node measurements."))
@@ -61,11 +68,7 @@ class HostUtilsV2(hostutils.HostUtils):
             # relate the two because using associators on Msvm_Processor
             # will also result in a crash.
             processors = self._conn_virt.Msvm_Processor(['DeviceID'])
-            numa_assoc_query = ("SELECT * FROM Msvm_HostedDependency "
-                                "WHERE Antecedent = '%s'" % node.path_())
-            numa_assoc = self._conn_virt.query(numa_assoc_query)
-            numa_node_proc_paths = [item.Dependent for item in numa_assoc]
-            cpu_info = self._get_numa_cpu_info(numa_node_proc_paths, processors)
+            cpu_info = self._get_numa_cpu_info(numa_node_paths, processors)
             if not cpu_info:
                 LOG.warning(_LW("Could not find CPU information for NUMA "
                                 "node. Skipping node measurements."))
@@ -89,14 +92,19 @@ class HostUtilsV2(hostutils.HostUtils):
 
         return nodes_info
 
-    def _get_numa_memory_info(self, node):
-        memory_info = node.associators(wmi_result_class=self._MSVM_MEMORY)
+    def _get_numa_memory_info(self, numa_node_paths, system_memories):
+        memory_info = []
+        paths = [x.upper() for x in numa_node_paths]
+        for memory in system_memories:
+            if memory.path_().upper() in paths:
+                memory_info.append(memory)
+
         if memory_info:
             return memory_info[0]
 
-    def _get_numa_cpu_info(self, numa_node_proc_paths, processors):
+    def _get_numa_cpu_info(self, numa_node_paths, processors):
         cpu_info = []
-        paths = [x.upper() for x in numa_node_proc_paths]
+        paths = [x.upper() for x in numa_node_paths]
         for proc in processors:
             if proc.path_().upper() in paths:
                 cpu_info.append(proc)
